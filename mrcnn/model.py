@@ -22,6 +22,7 @@ import keras.backend as K
 import keras.layers as KL
 import keras.engine as KE
 import keras.models as KM
+import time
 
 from mrcnn import utils
 
@@ -2150,13 +2151,13 @@ class MaskRCNN():
                                 md5_hash='a268eb855778b3df3c7506639542a6af')
         return weights_path
 
-    def compile(self, learning_rate, momentum):
+    def compile(self, momentum):
         """Gets the model ready for training. Adds losses, regularization, and
         metrics. Then calls the Keras compile() function.
         """
         # Optimizer object
         optimizer = keras.optimizers.SGD(
-            lr=learning_rate, momentum=momentum,
+            momentum=momentum,
             clipnorm=self.config.GRADIENT_CLIP_NORM)
         # Add Losses
         # First, clear previously set losses to avoid duplication
@@ -2274,7 +2275,8 @@ class MaskRCNN():
             "*epoch*", "{epoch:04d}")
 
     def train(self, train_dataset, val_dataset, learning_rate, epochs, layers,
-              augmentation=None, custom_callbacks=None, no_augmentation_sources=None):
+              augmentation=None, custom_callbacks=None, no_augmentation_sources=None,
+              decay_steps=[0]):
         """Train the model.
         train_dataset, val_dataset: Training and validation Dataset objects.
         learning_rate: The learning rate to train with
@@ -2334,13 +2336,36 @@ class MaskRCNN():
         # Create log_dir if it does not exist
         if not os.path.exists(self.log_dir):
             os.makedirs(self.log_dir)
+        
+        if isinstance(learning_rate, list):
+        
+            assert len(learning_rate) == len(decay_steps) + 1
+        
+        else:
+            learning_rate = [learning_rate, learning_rate]
+            decay_steps = [0]
+            
+        def scheduler(epoch):
+            idx = 0
+            for bound in decay_steps:
+                if epoch < bound:
+                    break
+                idx += 1
+            return learning_rate[idx]
+            
+        if custom_callbacks:
+            custom_callbacks += [keras.callbacks.LearningRateScheduler(scheduler)]
+        else:
+            custom_callbacks = [keras.callbacks.LearningRateScheduler(scheduler)]
+                    
 
         # Callbacks
         callbacks = [
             keras.callbacks.TensorBoard(log_dir=self.log_dir,
                                         histogram_freq=0, write_graph=True, write_images=False),
             keras.callbacks.ModelCheckpoint(self.checkpoint_path,
-                                            verbose=0, save_weights_only=True),
+                                            verbose=0, save_weights_only=True, save_best_only=False,
+                                            monitor='val_loss')
         ]
 
         # Add custom callbacks to the list
@@ -2351,7 +2376,7 @@ class MaskRCNN():
         log("\nStarting at epoch {}. LR={}\n".format(self.epoch, learning_rate))
         log("Checkpoint Path: {}".format(self.checkpoint_path))
         self.set_trainable(layers)
-        self.compile(learning_rate, self.config.LEARNING_MOMENTUM)
+        self.compile(self.config.LEARNING_MOMENTUM)
 
         # Work-around for Windows: Keras fails on Windows when using
         # multiprocessing workers. See discussion here:
@@ -2370,8 +2395,8 @@ class MaskRCNN():
             validation_data=val_generator,
             validation_steps=self.config.VALIDATION_STEPS,
             max_queue_size=100,
-            workers=workers,
-            use_multiprocessing=True,
+            workers=1,
+            use_multiprocessing=False,
         )
         self.epoch = max(self.epoch, epochs)
 
@@ -2520,8 +2545,10 @@ class MaskRCNN():
             log("image_metas", image_metas)
             log("anchors", anchors)
         # Run object detection
+        t = time.time()
         detections, _, _, mrcnn_mask, _, _, _ =\
             self.keras_model.predict([molded_images, image_metas, anchors], verbose=0)
+        print("Net forward pass time: ", time.time() - t, "[s]")
         # Process detections
         results = []
         for i, image in enumerate(images):

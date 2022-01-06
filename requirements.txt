@@ -1,7 +1,6 @@
 numpy
 scipy
 Pillow
-cython
 matplotlib
 scikit-image
 tensorflow>=1.3.0
